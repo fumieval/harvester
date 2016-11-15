@@ -1,0 +1,31 @@
+name:                harvester
+version:             0
+synopsis:            Command line aggregator
+description:         Please see README.md
+homepage:            https://github.com/fumieval/harvester#readme
+license:             BSD3
+license-file:        LICENSE
+author:              Author name here
+maintainer:          example@example.com
+copyright:           2016 Author name here
+category:            Web
+build-type:          Simple
+-- extra-source-files:
+cabal-version:       >=1.10
+
+executable harvester
+  hs-source-dirs:      app
+  main-is:             Main.hs
+  ghc-options:         -O2 -Wall
+  build-depends:       base
+    , ansi-wl-pprint
+    , trifecta
+    , foldl
+    , parsers
+    , containers
+    , comonad
+  default-language:    Haskell2010
+
+source-repository head
+  type:     git
+  location: https://github.com/fumieval/harvester
