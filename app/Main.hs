@@ -71,8 +71,7 @@ toFold :: Aggregation -> F.Fold [String] Val
 toFold (Sum expr) = F.Fold add 0 Dbl where
   add x str = x + asDbl (eval expr str)
 toFold (Distrib expr aggr) = F.Fold ins Map.empty (Map . fmap extract) where
-  ins m str = Map.alter (Just . maybe (toFold aggr)
-    (\(F.Fold f x r) -> F.Fold f (f x str) r))
+  ins m str = Map.alter (Just . (\(F.Fold f x r) -> F.Fold f (f x str) r) . maybe (toFold aggr) id)
     (eval expr str) m
 toFold Len = Dbl <$> F.genericLength
 toFold (Expr e) = runExpr toFold e
