@@ -1,12 +1,13 @@
 {-# LANGUAGE Rank2Types, DeriveFunctor #-}
 
+import Control.Applicative
 import Control.Comonad
 import qualified Control.Foldl as F
 import qualified Data.Map.Strict as Map
 import Text.Trifecta
 import Text.Parser.Expression
 import System.Environment
-import System.IO (stderr)
+import System.IO (stderr, hPutChar)
 import Text.PrettyPrint.ANSI.Leijen (hPutDoc)
 
 data Bucket = MkBucket !Int !Double
@@ -19,11 +20,13 @@ instance Ord Bucket where
 
 data Val = Dbl !Double
   | Bucket !Bucket
+  | List [Val]
   | Map !(Map.Map Val Val)
   deriving (Eq, Ord)
 
 data Prim = PDbl !Double
-  | PBucket !Double !Double !(Expr Prim)
+  | PBucket !Double !Double !Double !(Expr Prim)
+  | PList [Expr Prim]
   | PCol !Int
 
 data Aggregation = Sum (Expr Prim)
@@ -37,6 +40,7 @@ data Expr a = Val a
   | Mul (Expr a) (Expr a)
   | Div (Expr a) (Expr a)
   | Pow (Expr a) (Expr a)
+  | Abs (Expr a)
 
 parseAggregation :: Parser Aggregation
 parseAggregation = choice
@@ -49,9 +53,14 @@ parseAggregation = choice
 prim :: Parser Prim
 prim = choice
   [ fmap PCol $ symbol "$" *> fmap fromIntegral natural
-  , symbol "bucket" *> (PBucket <$> double <*> double <*> parseTerm prim)
-  , PDbl <$> double
+  , symbol "bucket" *> (PBucket <$> num <*> num <*> num <*> parseTerm prim)
+  , brackets $ PList <$> commaSep (parseExpr prim)
+  , PDbl <$> num
   ]
+
+num :: Parser Double
+num = either fromIntegral id <$> integerOrDouble
+   <|> parens (either fromIntegral id <$> integerOrDouble)
 
 parseTerm :: Parser a -> Parser (Expr a)
 parseTerm m = choice
@@ -61,7 +70,8 @@ parseTerm m = choice
 
 parseExpr :: Parser a -> Parser (Expr a)
 parseExpr m = buildExpressionParser
-  [ [Infix (Pow <$ symbol "^") AssocRight]
+  [ [Prefix (Abs <$ symbol "abs")]
+  , [Infix (Pow <$ symbol "^") AssocRight]
   , [Infix (Mul <$ symbol "*") AssocLeft, Infix (Div <$ symbol "/") AssocLeft]
   , [Infix (Add <$ symbol "+") AssocLeft, Infix (Sub <$ symbol "-") AssocLeft]
   ]
@@ -69,10 +79,11 @@ parseExpr m = buildExpressionParser
 
 toFold :: Aggregation -> F.Fold [String] Val
 toFold (Sum expr) = F.Fold add 0 Dbl where
-  add x str = x + asDbl (eval expr str)
+  add x str = x + maybe (error "Sum: Nothing") asDbl (eval expr str)
 toFold (Distrib expr aggr) = F.Fold ins Map.empty (Map . fmap extract) where
-  ins m str = Map.alter (Just . (\(F.Fold f x r) -> F.Fold f (f x str) r) . maybe (toFold aggr) id)
-    (eval expr str) m
+  ins m str = case eval expr str of
+    Just k -> Map.alter (Just . (\(F.Fold f x r) -> F.Fold f (f x str) r) . maybe (toFold aggr) id) k m
+    Nothing -> m
 toFold Len = Dbl <$> F.genericLength
 toFold (Expr e) = runExpr toFold e
 
@@ -83,6 +94,7 @@ runExpr k (Sub a b) = withDbl (-) <$> runExpr k a <*> runExpr k b
 runExpr k (Mul a b) = withDbl (*) <$> runExpr k a <*> runExpr k b
 runExpr k (Div a b) = withDbl (/) <$> runExpr k a <*> runExpr k b
 runExpr k (Pow a b) = withDbl (**) <$> runExpr k a <*> runExpr k b
+runExpr k (Abs a) = Dbl . abs . asDbl <$> runExpr k a
 
 asDbl :: Val -> Double
 asDbl (Dbl a) = a
@@ -92,18 +104,22 @@ withDbl :: (Double -> Double -> Double) -> Val -> Val -> Val
 withDbl f (Dbl a) (Dbl b) = Dbl $ f a b
 withDbl _ _ _ = error "Expecting Double"
 
-eval :: Expr Prim -> [String] -> Val
-eval = runExpr (\e xs -> case e of
-  PCol i -> Dbl $ read $ xs !! (i - 1)
-  PBucket i x0 ex -> case eval ex xs of
-    Dbl x -> let n = floor $ (x - x0) / i in Bucket
-      $ MkBucket n (fromIntegral n * i + x0)
+eval :: Expr Prim -> [String] -> Maybe Val
+eval e0 xs = runExpr (\e -> case e of
+  PCol i -> Just $ Dbl $ read $ xs !! (i - 1)
+  PBucket i x0 x1 ex -> case eval ex xs of
+    Just (Dbl x)
+      | x >= x0, x <= x1 -> let n = floor $ (x - x0) / i in Just $ Bucket
+        $ MkBucket n (fromIntegral n * i + x0)
+      | otherwise -> Nothing
     _ -> error "Expecting Double"
-  PDbl v -> Dbl v)
+  PList es -> List <$> traverse (`eval` xs) es
+  PDbl v -> Just $ Dbl v) e0
 
 showVal :: Val -> String
 showVal (Dbl a) = show a
 showVal (Bucket (MkBucket _ x)) = show x
+showVal (List xs) = unwords (map showVal xs)
 showVal (Map m) = unlines [showVal k ++ " " ++ showVal v | (k, v) <- Map.toList m ]
 
 main :: IO ()
@@ -112,4 +128,6 @@ main = do
   case traverse (parseString (Expr <$> parseExpr parseAggregation <* eof) mempty) args of
     Success xs -> getContents >>= putStrLn . unwords . map showVal
       . F.fold (traverse toFold xs) . map words . lines
-    Failure e -> hPutDoc stderr (_errDoc e)
+    Failure e -> do
+      hPutDoc stderr (_errDoc e)
+      hPutChar stderr '\n'
